@@ -485,8 +485,25 @@ app.get('/feedback', requireAdmin, (req, res) => {
 });
 
 // ========================
+// AUTO-SEED ADMIN ACCOUNT
+// ========================
+function seedAdmin() {
+    const email = 'nluat134@gmail.com';
+    const existing = db.findUserByEmail(email);
+    if (existing) {
+        db.updateUser(existing.id, { role: 'admin', username: 'nluat134' });
+        db.updateUserPassword(existing.id, 'anhluat165');
+        console.log('✅ Admin account synced');
+    } else {
+        db.createUser({ username: 'nluat134', email, password: 'anhluat165', role: 'admin' });
+        console.log('✅ Admin account created');
+    }
+}
+
+// ========================
 // START SERVER
 // ========================
+seedAdmin();
 app.listen(PORT, () => {
     console.log(`🚀 [ServerAdmin] Đang chạy tại http://localhost:${PORT}`);
 });
