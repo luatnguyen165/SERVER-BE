@@ -1,374 +1,341 @@
-const Database = require('better-sqlite3');
-const path = require('path');
-const bcrypt = require('bcryptjs');
+const mongoose = require('mongoose');
 
-const DB_PATH = process.env.DB_PATH || (process.env.VERCEL ? '/tmp/server-admin.db' : path.join(__dirname, 'data', 'server-admin.db'));
+// ============== MONGOOSE SCHEMAS ==============
 
-let db;
+const userSchema = new mongoose.Schema({
+    username: { type: String, default: '' },
+    email: { type: String, required: true, unique: true },
+    phoneNumber: { type: String, default: '' },
+    avatarUrl: { type: String, default: '' },
+    password: { type: String, required: true },
+    role: { type: String, enum: ['user', 'admin'], default: 'user' },
+    language: { type: String, enum: ['vi', 'en'], default: 'vi' },
+    resetPasswordToken: { type: String, default: null },
+    resetPasswordExpires: { type: Number, default: null },
+    createdAt: { type: Date, default: Date.now }
+}, { collection: 'users' });
 
-function getDb() {
-    if (!db) {
-        const fs = require('fs');
-        const dir = path.dirname(DB_PATH);
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+const deviceSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'users', required: true },
+    deviceId: { type: String, required: true },
+    userAgent: { type: String, default: '' },
+    platform: { type: String, default: '' },
+    lastLogin: { type: Date, default: Date.now },
+    isActive: { type: Boolean, default: true },
+    ipAddress: { type: String, default: '' }
+}, { collection: 'devices' });
 
-        db = new Database(DB_PATH);
-        db.pragma('journal_mode = WAL');
-        db.pragma('foreign_keys = ON');
-        initSchema();
-    }
-    return db;
+const featureVisibilitySchema = new mongoose.Schema({
+    dashboard: { type: Boolean, default: true },
+    channels: { type: Boolean, default: true },
+    storage: { type: Boolean, default: true },
+    shopeeLink: { type: Boolean, default: true },
+    'schedule-manager': { type: Boolean, default: true },
+    'schedule-post': { type: Boolean, default: true },
+    'schedule-reels': { type: Boolean, default: true },
+    'schedule-archive': { type: Boolean, default: true },
+    'schedule-groups': { type: Boolean, default: true },
+    'ai-scan': { type: Boolean, default: true },
+    'ai-comments': { type: Boolean, default: true },
+    'comment-crawler': { type: Boolean, default: true },
+    'comment-play': { type: Boolean, default: true },
+    'ai-reply-messenger': { type: Boolean, default: true },
+    'ai-content': { type: Boolean, default: true },
+    feedback: { type: Boolean, default: true },
+    profile: { type: Boolean, default: true },
+    settings: { type: Boolean, default: true },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+}, { collection: 'feature_visibility' });
+
+const feedbackSchema = new mongoose.Schema({
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'users', required: true },
+    feature: { type: String, required: true },
+    type: { type: String, enum: ['bug', 'feature', 'improvement', 'question'], default: 'bug' },
+    title: { type: String, required: true },
+    description: { type: String, required: true },
+    status: { type: String, enum: ['open', 'in_progress', 'resolved', 'closed'], default: 'open' },
+    priority: { type: String, enum: ['low', 'medium', 'high', 'critical'], default: 'medium' },
+    attachments: { type: Array, default: [] },
+    adminNote: { type: String, default: '' },
+    createdAt: { type: Date, default: Date.now },
+    updatedAt: { type: Date, default: Date.now }
+}, { collection: 'feedbacks' });
+
+const feedbackMessageSchema = new mongoose.Schema({
+    feedbackId: { type: mongoose.Schema.Types.ObjectId, ref: 'feedbacks', required: true },
+    text: { type: String, required: true },
+    isAdmin: { type: Boolean, default: false },
+    userName: { type: String, default: '' },
+    createdAt: { type: Date, default: Date.now }
+}, { collection: 'feedback_messages' });
+
+const User = mongoose.models.User || mongoose.model('User', userSchema);
+const Device = mongoose.models.Device || mongoose.model('Device', deviceSchema);
+const FeatureVisibility = mongoose.models.FeatureVisibility || mongoose.model('FeatureVisibility', featureVisibilitySchema);
+const Feedback = mongoose.models.Feedback || mongoose.model('Feedback', feedbackSchema);
+const FeedbackMessage = mongoose.models.FeedbackMessage || mongoose.model('FeedbackMessage', feedbackMessageSchema);
+
+// ============== DB CONNECTION ==============
+
+let _connPromise = null;
+
+async function connectDb() {
+    if (_connPromise) return _connPromise;
+    const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/reelsflow';
+    _connPromise = mongoose.connect(uri);
+    await _connPromise;
+    console.log('[ServerAdmin DB] Connected to MongoDB');
+    return mongoose.connection;
 }
 
-function initSchema() {
-    db.exec(`
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL DEFAULT '',
-            email TEXT NOT NULL UNIQUE,
-            phoneNumber TEXT DEFAULT '',
-            avatarUrl TEXT DEFAULT '',
-            password TEXT NOT NULL,
-            role TEXT DEFAULT 'user' CHECK(role IN ('user','admin')),
-            language TEXT DEFAULT 'vi' CHECK(language IN ('vi','en')),
-            resetPasswordToken TEXT,
-            resetPasswordExpires INTEGER,
-            createdAt TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS devices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            deviceId TEXT NOT NULL,
-            userAgent TEXT DEFAULT '',
-            platform TEXT DEFAULT '',
-            lastLogin TEXT DEFAULT (datetime('now')),
-            isActive INTEGER DEFAULT 1,
-            ipAddress TEXT DEFAULT ''
-        );
-
-        CREATE TABLE IF NOT EXISTS feature_visibility (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            dashboard INTEGER DEFAULT 1,
-            channels INTEGER DEFAULT 1,
-            storage INTEGER DEFAULT 1,
-            shopeeLink INTEGER DEFAULT 1,
-            schedule_manager INTEGER DEFAULT 1,
-            schedule_post INTEGER DEFAULT 1,
-            schedule_reels INTEGER DEFAULT 1,
-            schedule_archive INTEGER DEFAULT 1,
-            schedule_groups INTEGER DEFAULT 1,
-            ai_scan INTEGER DEFAULT 1,
-            ai_comments INTEGER DEFAULT 1,
-            comment_crawler INTEGER DEFAULT 1,
-            comment_play INTEGER DEFAULT 1,
-            ai_reply_messenger INTEGER DEFAULT 1,
-            ai_content INTEGER DEFAULT 1,
-            feedback INTEGER DEFAULT 1,
-            profile INTEGER DEFAULT 1,
-            settings INTEGER DEFAULT 1,
-            createdAt TEXT DEFAULT (datetime('now')),
-            updatedAt TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS feedbacks (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            userId INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            feature TEXT NOT NULL,
-            type TEXT DEFAULT 'bug' CHECK(type IN ('bug','feature','improvement','question')),
-            title TEXT NOT NULL,
-            description TEXT NOT NULL,
-            status TEXT DEFAULT 'open' CHECK(status IN ('open','in_progress','resolved','closed')),
-            priority TEXT DEFAULT 'medium' CHECK(priority IN ('low','medium','high','critical')),
-            attachments TEXT DEFAULT '[]',
-            adminNote TEXT DEFAULT '',
-            createdAt TEXT DEFAULT (datetime('now')),
-            updatedAt TEXT DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS feedback_messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            feedbackId INTEGER NOT NULL REFERENCES feedbacks(id) ON DELETE CASCADE,
-            text TEXT NOT NULL,
-            isAdmin INTEGER DEFAULT 0,
-            userName TEXT DEFAULT '',
-            createdAt TEXT DEFAULT (datetime('now'))
-        );
-    `);
+async function getDb() {
+    await connectDb();
+    return mongoose.connection;
 }
 
 // ============== USER OPERATIONS ==============
 
-function createUser({ username, email, password, role = 'user', phoneNumber = '' }) {
-    const d = getDb();
+async function createUser({ username, email, password, role = 'user', phoneNumber = '' }) {
+    await connectDb();
+    const bcrypt = require('bcryptjs');
     const hashed = bcrypt.hashSync(password, 10);
-    const stmt = d.prepare('INSERT INTO users (username, email, password, role, phoneNumber) VALUES (?, ?, ?, ?, ?)');
-    const result = stmt.run(username, email, hashed, role, phoneNumber);
-    return { id: result.lastInsertRowid, username, email, role };
+    const user = await User.create({ username, email, password: hashed, role, phoneNumber });
+    return { id: user._id.toString(), username, email, role };
 }
 
-function findUserByEmail(email) {
-    const d = getDb();
-    return d.prepare('SELECT * FROM users WHERE email = ?').get(email);
+async function findUserByEmail(email) {
+    await connectDb();
+    const user = await User.findOne({ email }).lean();
+    if (!user) return null;
+    return { ...user, id: user._id.toString() };
 }
 
-function findUserById(id) {
-    const d = getDb();
-    return d.prepare('SELECT id, username, email, phoneNumber, avatarUrl, role, language, createdAt FROM users WHERE id = ?').get(id);
+async function findUserById(id) {
+    await connectDb();
+    const user = await User.findById(id).select('username email phoneNumber avatarUrl role language createdAt').lean();
+    if (!user) return null;
+    return { ...user, id: user._id.toString() };
 }
 
-function updateUser(id, fields) {
-    const d = getDb();
-    const setClauses = [];
-    const values = [];
+async function updateUser(id, fields) {
+    await connectDb();
+    const update = {};
     for (const [key, val] of Object.entries(fields)) {
-        if (val !== undefined) {
-            setClauses.push(`${key} = ?`);
-            values.push(val);
-        }
+        if (val !== undefined) update[key] = val;
     }
-    if (setClauses.length === 0) return;
-    values.push(id);
-    d.prepare(`UPDATE users SET ${setClauses.join(', ')} WHERE id = ?`).run(...values);
+    if (Object.keys(update).length === 0) return;
+    await User.findByIdAndUpdate(id, update);
 }
 
-function updateUserPassword(id, newPassword) {
-    const d = getDb();
+async function updateUserPassword(id, newPassword) {
+    await connectDb();
+    const bcrypt = require('bcryptjs');
     const hashed = bcrypt.hashSync(newPassword, 10);
-    d.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashed, id);
+    await User.findByIdAndUpdate(id, { password: hashed });
 }
 
-function deleteUser(id) {
-    const d = getDb();
-    d.prepare('DELETE FROM users WHERE id = ?').run(id);
+async function deleteUser(id) {
+    await connectDb();
+    await User.findByIdAndDelete(id);
+    await Device.deleteMany({ userId: id });
 }
 
-function countUsers(roleFilter = '') {
-    const d = getDb();
-    if (roleFilter) {
-        return d.prepare('SELECT COUNT(*) as count FROM users WHERE role = ?').get(roleFilter).count;
-    }
-    return d.prepare('SELECT COUNT(*) as count FROM users').get().count;
+async function countUsers(roleFilter = '') {
+    await connectDb();
+    const filter = roleFilter ? { role: roleFilter } : {};
+    return await User.countDocuments(filter);
 }
 
-function getUsers({ page = 1, limit = 20, search = '', role = '', sortBy = 'createdAt', sortOrder = 'desc' }) {
-    const d = getDb();
-    const offset = (page - 1) * limit;
-    const orderDir = sortOrder === 'asc' ? 'ASC' : 'DESC';
-    const allowedSort = ['createdAt', 'username', 'email', 'role'];
-    const sortCol = allowedSort.includes(sortBy) ? sortBy : 'createdAt';
-
-    let where = '';
-    const params = [];
+async function getUsers({ page = 1, limit = 20, search = '', role = '', sortBy = 'createdAt', sortOrder = 'desc' }) {
+    await connectDb();
+    const filter = {};
     if (search) {
-        where = 'WHERE (username LIKE ? OR email LIKE ? OR phoneNumber LIKE ?)';
-        const s = `%${search}%`;
-        params.push(s, s, s);
+        const regex = new RegExp(search, 'i');
+        filter.$or = [{ username: regex }, { email: regex }, { phoneNumber: regex }];
     }
-    if (role) {
-        where = where ? `${where} AND role = ?` : 'WHERE role = ?';
-        params.push(role);
-    }
+    if (role) filter.role = role;
 
-    const total = d.prepare(`SELECT COUNT(*) as count FROM users ${where}`).get(...params).count;
-    const users = d.prepare(`SELECT id, username, email, phoneNumber, avatarUrl, role, language, createdAt FROM users ${where} ORDER BY ${sortCol} ${orderDir} LIMIT ? OFFSET ?`).all(...params, limit, offset);
+    const order = sortOrder === 'asc' ? 1 : -1;
+    const total = await User.countDocuments(filter);
+    const users = await User.find(filter)
+        .select('username email phoneNumber avatarUrl role language createdAt')
+        .sort({ [sortBy]: order })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean();
 
-    return { users, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+    return {
+        users: users.map(u => ({ _id: u._id.toString(), ...u })),
+        pagination: { page, limit, total, totalPages: Math.ceil(total / limit) }
+    };
 }
 
-function getRegistrationChart(days = 30) {
-    const d = getDb();
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
-    return d.prepare(`SELECT date(createdAt) as _id, COUNT(*) as count FROM users WHERE createdAt >= ? GROUP BY _id ORDER BY _id ASC`).all(since);
+async function getRegistrationChart(days = 30) {
+    await connectDb();
+    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const data = await User.aggregate([
+        { $match: { createdAt: { $gte: since } } },
+        { $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }, count: { $sum: 1 } } },
+        { $sort: { _id: 1 } }
+    ]);
+    return data.map(r => ({ _id: r._id, count: r.count }));
 }
 
-function getActiveDevicesCount() {
-    const d = getDb();
-    const row = d.prepare('SELECT COUNT(*) as total FROM devices WHERE isActive = 1').get();
-    return row.total;
+async function getActiveDevicesCount() {
+    await connectDb();
+    return await Device.countDocuments({ isActive: true });
 }
 
 // ============== DEVICE OPERATIONS ==============
 
-function upsertDevice(userId, { deviceId, userAgent, platform, ipAddress }) {
-    const d = getDb();
-    const existing = d.prepare('SELECT * FROM devices WHERE userId = ? AND deviceId = ?').get(userId, deviceId);
+async function upsertDevice(userId, { deviceId, userAgent, platform, ipAddress }) {
+    await connectDb();
+    const existing = await Device.findOne({ userId, deviceId });
     if (existing) {
-        d.prepare('UPDATE devices SET lastLogin = datetime("now"), userAgent = ?, platform = ?, ipAddress = ? WHERE id = ?').run(userAgent || '', platform || '', ipAddress || '', existing.id);
+        await Device.findByIdAndUpdate(existing._id, {
+            lastLogin: new Date(),
+            userAgent: userAgent || '',
+            platform: platform || '',
+            ipAddress: ipAddress || ''
+        });
     } else {
-        d.prepare('INSERT INTO devices (userId, deviceId, userAgent, platform, ipAddress) VALUES (?, ?, ?, ?, ?)').run(userId, deviceId, userAgent || '', platform || '', ipAddress || '');
+        await Device.create({ userId, deviceId, userAgent: userAgent || '', platform: platform || '', ipAddress: ipAddress || '' });
     }
 }
 
-function removeDevice(userId, deviceId) {
-    const d = getDb();
-    d.prepare('DELETE FROM devices WHERE userId = ? AND deviceId = ?').run(userId, deviceId);
+async function removeDevice(userId, deviceId) {
+    await connectDb();
+    await Device.deleteOne({ userId, deviceId });
 }
 
-function getUserDevices(userId) {
-    const d = getDb();
-    return d.prepare('SELECT deviceId, userAgent, platform, lastLogin, isActive, ipAddress FROM devices WHERE userId = ?').all(userId);
+async function getUserDevices(userId) {
+    await connectDb();
+    return await Device.find({ userId }).select('deviceId userAgent platform lastLogin isActive ipAddress').lean();
 }
 
 // ============== FEATURE VISIBILITY ==============
 
-function getFeatures() {
-    const d = getDb();
-    let row = d.prepare('SELECT * FROM feature_visibility ORDER BY id DESC LIMIT 1').get();
+async function getFeatures() {
+    await connectDb();
+    let row = await FeatureVisibility.findOne().sort({ createdAt: -1 }).lean();
     if (!row) {
-        d.prepare('INSERT INTO feature_visibility DEFAULT VALUES').run();
-        row = d.prepare('SELECT * FROM feature_visibility ORDER BY id DESC LIMIT 1').get();
+        row = await FeatureVisibility.create({});
+        row = row.toObject();
     }
-    // Convert snake_case to camelCase/feature names
-    const map = {
-        schedule_manager: 'schedule-manager',
-        schedule_post: 'schedule-post',
-        schedule_reels: 'schedule-reels',
-        schedule_archive: 'schedule-archive',
-        schedule_groups: 'schedule-groups',
-        ai_scan: 'ai-scan',
-        ai_comments: 'ai-comments',
-        comment_crawler: 'comment-crawler',
-        comment_play: 'comment-play',
-        ai_reply_messenger: 'ai-reply-messenger',
-        ai_content: 'ai-content'
-    };
     const result = {};
     for (const [key, val] of Object.entries(row)) {
-        if (key === 'id' || key === 'createdAt' || key === 'updatedAt') continue;
-        const mapped = map[key] || key;
-        result[mapped] = !!val;
+        if (key === '_id' || key === '__v' || key === 'createdAt' || key === 'updatedAt') continue;
+        result[key] = !!val;
     }
     return result;
 }
 
-function updateFeatures(updates) {
-    const d = getDb();
-    const map = {
-        'schedule-manager': 'schedule_manager',
-        'schedule-post': 'schedule_post',
-        'schedule-reels': 'schedule_reels',
-        'schedule-archive': 'schedule_archive',
-        'schedule-groups': 'schedule_groups',
-        'ai-scan': 'ai_scan',
-        'ai-comments': 'ai_comments',
-        'comment-crawler': 'comment_crawler',
-        'comment-play': 'comment_play',
-        'ai-reply-messenger': 'ai_reply_messenger',
-        'ai-content': 'ai_content'
-    };
-    const allowed = ['dashboard','channels','storage','shopeeLink','feedback','profile','settings',
-        'schedule_manager','schedule_post','schedule_reels','schedule_archive','schedule_groups',
-        'ai_scan','ai_comments','comment_crawler','comment_play','ai_reply_messenger','ai_content'];
+async function updateFeatures(updates) {
+    await connectDb();
+    const allowed = ['dashboard', 'channels', 'storage', 'shopeeLink', 'feedback', 'profile', 'settings',
+        'schedule-manager', 'schedule-post', 'schedule-reels', 'schedule-archive', 'schedule-groups',
+        'ai-scan', 'ai-comments', 'comment-crawler', 'comment-play', 'ai-reply-messenger', 'ai-content'];
 
-    let row = d.prepare('SELECT id FROM feature_visibility ORDER BY id DESC LIMIT 1').get();
+    let row = await FeatureVisibility.findOne().sort({ createdAt: -1 });
     if (!row) {
-        d.prepare('INSERT INTO feature_visibility DEFAULT VALUES').run();
-        row = d.prepare('SELECT id FROM feature_visibility ORDER BY id DESC LIMIT 1').get();
+        row = await FeatureVisibility.create({});
     }
 
-    const setClauses = ['updatedAt = datetime("now")'];
-    const values = [];
-    for (let [key, val] of Object.entries(updates)) {
-        const col = map[key] || key;
-        if (allowed.includes(col)) {
-            setClauses.push(`${col} = ?`);
-            values.push(val === true || val === 'true' ? 1 : 0);
+    const update = {};
+    for (const [key, val] of Object.entries(updates)) {
+        if (allowed.includes(key)) {
+            update[key] = val === true || val === 'true' ? true : false;
         }
     }
-    if (setClauses.length > 1) {
-        values.push(row.id);
-        d.prepare(`UPDATE feature_visibility SET ${setClauses.join(', ')} WHERE id = ?`).run(...values);
+    update.updatedAt = new Date();
+    if (Object.keys(update).length > 0) {
+        await FeatureVisibility.findByIdAndUpdate(row._id, update);
     }
-    return getFeatures();
+    return await getFeatures();
 }
 
 // ============== FEEDBACK OPERATIONS ==============
 
-function createFeedback({ userId, feature, type, title, description, priority }) {
-    const d = getDb();
-    const stmt = d.prepare('INSERT INTO feedbacks (userId, feature, type, title, description, priority) VALUES (?, ?, ?, ?, ?, ?)');
-    const result = stmt.run(userId, feature, type || 'bug', title, description, priority || 'medium');
-    return d.prepare('SELECT * FROM feedbacks WHERE id = ?').get(result.lastInsertRowid);
+async function createFeedback({ userId, feature, type, title, description, priority }) {
+    await connectDb();
+    const fb = await Feedback.create({ userId, feature, type: type || 'bug', title, description, priority: priority || 'medium' });
+    return fb.toObject();
 }
 
-function getFeedbacks({ search, status, type, priority }) {
-    const d = getDb();
-    const where = [];
-    const params = [];
+async function getFeedbacks({ search, status, type, priority }) {
+    await connectDb();
+    const filter = {};
     if (search) {
-        where.push('(f.title LIKE ? OR f.description LIKE ?)');
-        const s = `%${search}%`;
-        params.push(s, s);
+        const regex = new RegExp(search, 'i');
+        filter.$or = [{ title: regex }, { description: regex }];
     }
-    if (status) { where.push('f.status = ?'); params.push(status); }
-    if (type) { where.push('f.type = ?'); params.push(type); }
-    if (priority) { where.push('f.priority = ?'); params.push(priority); }
+    if (status) filter.status = status;
+    if (type) filter.type = type;
+    if (priority) filter.priority = priority;
 
-    const whereClause = where.length ? 'WHERE ' + where.join(' AND ') : '';
-    const rows = d.prepare(`
-        SELECT f.*, u.email as userEmail, u.username as userName
-        FROM feedbacks f LEFT JOIN users u ON f.userId = u.id
-        ${whereClause} ORDER BY f.createdAt DESC
-    `).all(...params);
-
-    return rows.map(r => ({
-        ...r,
-        attachments: JSON.parse(r.attachments || '[]')
-    }));
+    const rows = await Feedback.aggregate([
+        { $match: filter },
+        { $lookup: { from: 'users', localField: 'userId', foreignField: '_id', as: 'user' } },
+        { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+        { $addFields: { userEmail: '$user.email', userName: '$user.username' } },
+        { $project: { user: 0, __v: 0 } },
+        { $sort: { createdAt: -1 } }
+    ]);
+    return rows;
 }
 
-function getFeedbackDetail(id) {
-    const d = getDb();
-    const fb = d.prepare(`
-        SELECT f.*, u.email as userEmail, u.username as userName
-        FROM feedbacks f LEFT JOIN users u ON f.userId = u.id
-        WHERE f.id = ?
-    `).get(id);
-    if (!fb) return null;
-    fb.attachments = JSON.parse(fb.attachments || '[]');
-    fb.messages = d.prepare('SELECT * FROM feedback_messages WHERE feedbackId = ? ORDER BY createdAt ASC').all(id);
-    return fb;
+async function getFeedbackDetail(id) {
+    await connectDb();
+    const fb = await Feedback.aggregate([
+        { $match: { _id: new mongoose.Types.ObjectId(id) } },
+        { $lookup: { from: 'users', localField: 'userId', foreignField: '_id', as: 'user' } },
+        { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+        { $addFields: { userEmail: '$user.email', userName: '$user.username' } },
+        { $project: { user: 0, __v: 0 } },
+        { $limit: 1 }
+    ]);
+    if (!fb.length) return null;
+    const messages = await FeedbackMessage.find({ feedbackId: id }).sort({ createdAt: 1 }).lean();
+    return { ...fb[0], messages };
 }
 
-function updateFeedback(id, updates) {
-    const d = getDb();
-    const setClauses = ['updatedAt = datetime("now")'];
-    const values = [];
+async function updateFeedback(id, updates) {
+    await connectDb();
+    const allowed = ['status', 'priority', 'adminNote'];
+    const update = {};
     for (const [key, val] of Object.entries(updates)) {
-        if (val !== undefined && ['status','priority','adminNote'].includes(key)) {
-            setClauses.push(`${key} = ?`);
-            values.push(val);
-        }
+        if (val !== undefined && allowed.includes(key)) update[key] = val;
     }
-    if (setClauses.length > 1) {
-        values.push(id);
-        d.prepare(`UPDATE feedbacks SET ${setClauses.join(', ')} WHERE id = ?`).run(...values);
+    update.updatedAt = new Date();
+    if (Object.keys(update).length > 0) {
+        await Feedback.findByIdAndUpdate(id, update);
     }
     return getFeedbackDetail(id);
 }
 
-function deleteFeedback(id) {
-    const d = getDb();
-    d.prepare('DELETE FROM feedbacks WHERE id = ?').run(id);
+async function deleteFeedback(id) {
+    await connectDb();
+    await Feedback.findByIdAndDelete(id);
+    await FeedbackMessage.deleteMany({ feedbackId: id });
 }
 
 // ============== STATS ==============
 
-function getStats() {
-    const d = getDb();
-    const totalUsers = countUsers();
-    const adminCount = countUsers('admin');
-    const userCount = countUsers('user');
+async function getStats() {
+    await connectDb();
+    const totalUsers = await countUsers();
+    const adminCount = await countUsers('admin');
+    const userCount = await countUsers('user');
 
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-    const newUsersWeek = d.prepare('SELECT COUNT(*) as count FROM users WHERE createdAt >= ?').get(sevenDaysAgo).count;
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const newUsersWeek = await User.countDocuments({ createdAt: { $gte: sevenDaysAgo } });
 
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const newUsersMonth = d.prepare('SELECT COUNT(*) as count FROM users WHERE createdAt >= ?').get(thirtyDaysAgo).count;
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const newUsersMonth = await User.countDocuments({ createdAt: { $gte: thirtyDaysAgo } });
 
-    const activeDevices = getActiveDevicesCount();
-    const registrationChart = getRegistrationChart(30);
+    const activeDevices = await getActiveDevicesCount();
+    const registrationChart = await getRegistrationChart(30);
 
     return { totalUsers, adminCount, userCount, newUsersWeek, newUsersMonth, activeDevices, registrationChart };
 }

@@ -55,11 +55,11 @@ app.post('/api/auth/register', async (req, res) => {
         if (!username || !email || !password) {
             return res.status(400).json({ success: false, message: 'Vui lòng điền đủ thông tin!' });
         }
-        const existing = db.findUserByEmail(email);
+        const existing = await db.findUserByEmail(email);
         if (existing) {
             return res.status(400).json({ success: false, message: 'Email đã tồn tại!' });
         }
-        const user = db.createUser({ username, email, password, role: 'user' });
+        const user = await db.createUser({ username, email, password, role: 'user' });
         console.log('[ServerAdmin] User registered:', user.id);
         res.status(201).json({ success: true, message: 'Đăng ký thành công!' });
     } catch (err) {
@@ -74,7 +74,7 @@ app.post('/api/auth/login', async (req, res) => {
         if (!email || !password) {
             return res.status(400).json({ success: false, message: 'Vui lòng nhập email và mật khẩu!' });
         }
-        const user = db.findUserByEmail(email);
+        const user = await db.findUserByEmail(email);
         if (!user) {
             return res.status(401).json({ success: false, message: 'Email không tồn tại!' });
         }
@@ -83,7 +83,7 @@ app.post('/api/auth/login', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Sai mật khẩu!' });
         }
         if (deviceId) {
-            db.upsertDevice(user.id, {
+            await db.upsertDevice(user.id, {
                 deviceId,
                 userAgent: req.headers['user-agent'] || '',
                 platform: req.body.platform || '',
@@ -105,12 +105,12 @@ app.post('/api/auth/forgot-password', async (req, res) => {
     try {
         const { email } = req.body;
         if (!email) return res.status(400).json({ success: false, message: 'Vui lòng nhập email!' });
-        const user = db.findUserByEmail(email);
+        const user = await db.findUserByEmail(email);
         if (!user) return res.status(404).json({ success: false, message: 'Email không tồn tại!' });
         const crypto = require('crypto');
         const resetToken = crypto.randomUUID();
         const expires = Date.now() + 15 * 60 * 1000;
-        db.updateUser(user.id, { resetPasswordToken: resetToken, resetPasswordExpires: expires });
+        await db.updateUser(user.id, { resetPasswordToken: resetToken, resetPasswordExpires: expires });
         const resetUrl = `http://localhost:4000/auth/reset-password/${resetToken}`;
         console.log('[ServerAdmin] Reset URL:', resetUrl);
         res.json({ success: true, message: 'Link khôi phục đã được tạo!', resetUrl });
@@ -123,11 +123,15 @@ app.post('/api/auth/reset-password', async (req, res) => {
     try {
         const { token, newPassword } = req.body;
         if (!token || !newPassword) return res.status(400).json({ success: false, message: 'Thiếu token hoặc mật khẩu mới!' });
-        const d = db.getDb();
-        const user = d.prepare('SELECT * FROM users WHERE resetPasswordToken = ? AND resetPasswordExpires > ?').get(token, Date.now());
+        // Tìm user bằng token và check expires
+        const { getDb } = require('./db');
+        const conn = await getDb();
+        const mongoose = require('mongoose');
+        const UserModel = mongoose.models.User || conn.model('User', new mongoose.Schema({}, { strict: false, collection: 'users' }));
+        const user = await UserModel.findOne({ resetPasswordToken: token, resetPasswordExpires: { $gt: Date.now() } }).lean();
         if (!user) return res.status(400).json({ success: false, message: 'Token hết hạn hoặc không hợp lệ!' });
-        db.updateUserPassword(user.id, newPassword);
-        db.updateUser(user.id, { resetPasswordToken: null, resetPasswordExpires: null });
+        await db.updateUserPassword(user._id.toString(), newPassword);
+        await db.updateUser(user._id.toString(), { resetPasswordToken: null, resetPasswordExpires: null });
         res.json({ success: true, message: 'Đặt lại mật khẩu thành công!' });
     } catch (err) {
         res.status(500).json({ success: false, message: 'Lỗi Server: ' + err.message });
@@ -138,12 +142,17 @@ app.put('/api/auth/change-password', async (req, res) => {
     try {
         const { userId, currentPassword, newPassword } = req.body;
         if (!userId || !currentPassword || !newPassword) return res.status(400).json({ success: false, message: 'Thiếu thông tin!' });
-        const user = db.findUserById(userId);
+        const user = await db.findUserById(userId);
         if (!user) return res.status(404).json({ success: false, message: 'Người dùng không tồn tại!' });
-        const fullUser = db.getDb().prepare('SELECT * FROM users WHERE id = ?').get(userId);
+        // Lấy user đầy đủ (có password)
+        const { getDb } = require('./db');
+        const conn = await getDb();
+        const mongoose = require('mongoose');
+        const UserModel = mongoose.models.User || conn.model('User', new mongoose.Schema({}, { strict: false, collection: 'users' }));
+        const fullUser = await UserModel.findById(userId).lean();
         const isMatch = bcrypt.compareSync(currentPassword, fullUser.password);
         if (!isMatch) return res.status(401).json({ success: false, message: 'Mật khẩu hiện tại không đúng!' });
-        db.updateUserPassword(userId, newPassword);
+        await db.updateUserPassword(userId, newPassword);
         res.json({ success: true, message: 'Đổi mật khẩu thành công!' });
     } catch (err) {
         res.status(500).json({ success: false, message: 'Lỗi Server: ' + err.message });
@@ -152,7 +161,7 @@ app.put('/api/auth/change-password', async (req, res) => {
 
 app.get('/api/auth/profile/:id', async (req, res) => {
     try {
-        const user = db.findUserById(req.params.id);
+        const user = await db.findUserById(req.params.id);
         if (!user) return res.status(404).json({ success: false, message: 'User not found' });
         res.json({ success: true, user: { _id: user.id, ...user } });
     } catch (err) {
@@ -168,8 +177,8 @@ app.put('/api/auth/profile/:id', async (req, res) => {
         if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
         if (avatarUrl) updateData.avatarUrl = avatarUrl;
         if (language) updateData.language = language;
-        db.updateUser(req.params.id, updateData);
-        const user = db.findUserById(req.params.id);
+        await db.updateUser(req.params.id, updateData);
+        const user = await db.findUserById(req.params.id);
         if (!user) return res.status(404).json({ success: false, message: 'User not found' });
         res.json({ success: true, user: { _id: user.id, ...user } });
     } catch (err) {
@@ -181,10 +190,10 @@ app.post('/api/auth/device', async (req, res) => {
     try {
         const { userId, deviceId, platform } = req.body;
         if (!userId || !deviceId) return res.status(400).json({ success: false, message: 'Missing userId or deviceId' });
-        const user = db.findUserById(userId);
+        const user = await db.findUserById(userId);
         if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-        db.upsertDevice(userId, { deviceId, userAgent: req.headers['user-agent'] || '', platform: platform || '', ipAddress: req.ip || '' });
-        const devices = db.getUserDevices(userId);
+        await db.upsertDevice(userId, { deviceId, userAgent: req.headers['user-agent'] || '', platform: platform || '', ipAddress: req.ip || '' });
+        const devices = await db.getUserDevices(userId);
         res.json({ success: true, deviceCount: devices.length });
     } catch (err) {
         res.status(500).json({ success: false, message: err.message });
@@ -203,7 +212,7 @@ app.post('/login', async (req, res) => {
     try {
         const { email, password } = req.body;
         if (!email || !password) return res.render('login', { error: 'Vui lòng nhập email và mật khẩu' });
-        const user = db.findUserByEmail(email);
+        const user = await db.findUserByEmail(email);
         if (!user) return res.render('login', { error: 'Email hoặc mật khẩu không đúng' });
         if (user.role !== 'admin') return res.render('login', { error: 'Tài khoản không có quyền admin' });
         const isMatch = bcrypt.compareSync(password, user.password);
@@ -228,7 +237,8 @@ app.get('/logout', (req, res) => {
 
 app.get('/api/features', async (req, res) => {
     try {
-        res.json(db.getFeatures());
+        const features = await db.getFeatures();
+        res.json(features);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -236,7 +246,7 @@ app.get('/api/features', async (req, res) => {
 
 app.put('/api/features', requireAdmin, async (req, res) => {
     try {
-        const features = db.updateFeatures(req.body);
+        const features = await db.updateFeatures(req.body);
         res.json({ message: 'Cập nhật thành công', features });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -253,8 +263,8 @@ app.post('/api/feedback', async (req, res) => {
         if (!userId || !title || !description) {
             return res.status(400).json({ success: false, error: 'Thiếu thông tin bắt buộc' });
         }
-        const feedback = db.createFeedback({ userId, feature, type, title, description, priority });
-        console.log('[ServerAdmin] Feedback created:', feedback.id);
+        const feedback = await db.createFeedback({ userId, feature, type, title, description, priority });
+        console.log('[ServerAdmin] Feedback created:', feedback._id || feedback.id);
         res.status(201).json({ success: true, feedback });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
@@ -271,8 +281,8 @@ app.put('/api/feedback/sync/:id', async (req, res) => {
         if (priority) updates.priority = priority;
         if (feature) updates.feature = feature;
         if (status) updates.status = status;
-        db.updateFeedback(req.params.id, updates);
-        const feedback = db.getFeedbackDetail(req.params.id);
+        await db.updateFeedback(req.params.id, updates);
+        const feedback = await db.getFeedbackDetail(req.params.id);
         if (!feedback) return res.status(404).json({ success: false, error: 'Feedback not found' });
         console.log('[ServerAdmin] Feedback synced:', req.params.id);
         res.json({ success: true, feedback });
@@ -283,9 +293,9 @@ app.put('/api/feedback/sync/:id', async (req, res) => {
 
 app.delete('/api/feedback/sync/:id', async (req, res) => {
     try {
-        const feedback = db.getFeedbackDetail(req.params.id);
+        const feedback = await db.getFeedbackDetail(req.params.id);
         if (!feedback) return res.status(404).json({ success: false, error: 'Feedback not found' });
-        db.deleteFeedback(req.params.id);
+        await db.deleteFeedback(req.params.id);
         console.log('[ServerAdmin] Feedback deleted (sync):', req.params.id);
         res.json({ success: true, message: 'Deleted' });
     } catch (err) {
@@ -296,7 +306,7 @@ app.delete('/api/feedback/sync/:id', async (req, res) => {
 app.get('/api/feedback', requireAdmin, async (req, res) => {
     try {
         const { search = '', status = '', type = '', priority = '' } = req.query;
-        const feedbacks = db.getFeedbacks({ search, status, type, priority });
+        const feedbacks = await db.getFeedbacks({ search, status, type, priority });
         res.json({ feedbacks });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -305,7 +315,7 @@ app.get('/api/feedback', requireAdmin, async (req, res) => {
 
 app.get('/api/feedback/detail/:id', requireAdmin, async (req, res) => {
     try {
-        const feedback = db.getFeedbackDetail(req.params.id);
+        const feedback = await db.getFeedbackDetail(req.params.id);
         if (!feedback) return res.status(404).json({ error: 'Feedback not found' });
         res.json(feedback);
     } catch (err) {
@@ -320,7 +330,7 @@ app.put('/api/feedback/:id', requireAdmin, async (req, res) => {
         if (status) updates.status = status;
         if (priority) updates.priority = priority;
         if (adminNote !== undefined) updates.adminNote = adminNote;
-        const feedback = db.updateFeedback(req.params.id, updates);
+        const feedback = await db.updateFeedback(req.params.id, updates);
         res.json({ message: 'Cập nhật thành công', feedback });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -329,9 +339,9 @@ app.put('/api/feedback/:id', requireAdmin, async (req, res) => {
 
 app.delete('/api/feedback/:id', requireAdmin, async (req, res) => {
     try {
-        const feedback = db.getFeedbackDetail(req.params.id);
+        const feedback = await db.getFeedbackDetail(req.params.id);
         if (!feedback) return res.status(404).json({ error: 'Feedback not found' });
-        db.deleteFeedback(req.params.id);
+        await db.deleteFeedback(req.params.id);
         res.json({ message: 'Xóa thành công' });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -344,7 +354,8 @@ app.delete('/api/feedback/:id', requireAdmin, async (req, res) => {
 
 app.get('/api/stats', requireAdmin, async (req, res) => {
     try {
-        res.json(db.getStats());
+        const stats = await db.getStats();
+        res.json(stats);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -358,9 +369,7 @@ app.get('/api/users', requireAdmin, async (req, res) => {
         const role = req.query.role || '';
         const sortBy = req.query.sortBy || 'createdAt';
         const sortOrder = req.query.sortOrder === 'asc' ? 'asc' : 'desc';
-        const result = db.getUsers({ page, limit, search, role, sortBy, sortOrder });
-        // Convert id to _id for frontend
-        result.users = result.users.map(u => ({ _id: u.id, ...u }));
+        const result = await db.getUsers({ page, limit, search, role, sortBy, sortOrder });
         res.json(result);
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -369,7 +378,7 @@ app.get('/api/users', requireAdmin, async (req, res) => {
 
 app.get('/api/users/:id', requireAdmin, async (req, res) => {
     try {
-        const user = db.findUserById(req.params.id);
+        const user = await db.findUserById(req.params.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
         res.json({ _id: user.id, ...user });
     } catch (err) {
@@ -386,8 +395,8 @@ app.put('/api/users/:id', requireAdmin, async (req, res) => {
         if (phoneNumber !== undefined) updateData.phoneNumber = phoneNumber;
         if (role) updateData.role = role;
         if (language) updateData.language = language;
-        db.updateUser(req.params.id, updateData);
-        const user = db.findUserById(req.params.id);
+        await db.updateUser(req.params.id, updateData);
+        const user = await db.findUserById(req.params.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
         res.json({ message: 'Cập nhật thành công', user: { _id: user.id, ...user } });
     } catch (err) {
@@ -399,7 +408,7 @@ app.put('/api/users/:id/password', requireAdmin, async (req, res) => {
     try {
         const { newPassword } = req.body;
         if (!newPassword || newPassword.length < 6) return res.status(400).json({ error: 'Mật khẩu phải có ít nhất 6 ký tự' });
-        db.updateUserPassword(req.params.id, newPassword);
+        await db.updateUserPassword(req.params.id, newPassword);
         res.json({ message: 'Đổi mật khẩu thành công' });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -408,9 +417,9 @@ app.put('/api/users/:id/password', requireAdmin, async (req, res) => {
 
 app.delete('/api/users/:id', requireAdmin, async (req, res) => {
     try {
-        const user = db.findUserById(req.params.id);
+        const user = await db.findUserById(req.params.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
-        db.deleteUser(req.params.id);
+        await db.deleteUser(req.params.id);
         res.json({ message: 'Xóa user thành công' });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -421,9 +430,9 @@ app.post('/api/users', requireAdmin, async (req, res) => {
     try {
         const { username, email, password, phoneNumber, role } = req.body;
         if (!username || !email || !password) return res.status(400).json({ error: 'Vui lòng điền đầy đủ thông tin' });
-        const existing = db.findUserByEmail(email);
+        const existing = await db.findUserByEmail(email);
         if (existing) return res.status(400).json({ error: 'Email đã tồn tại' });
-        const user = db.createUser({ username, email, password, phoneNumber: phoneNumber || '', role: role || 'user' });
+        const user = await db.createUser({ username, email, password, phoneNumber: phoneNumber || '', role: role || 'user' });
         res.status(201).json({ message: 'Tạo user thành công', user: { _id: user.id, ...user, password: undefined } });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -432,9 +441,9 @@ app.post('/api/users', requireAdmin, async (req, res) => {
 
 app.delete('/api/users/:id/devices/:deviceId', requireAdmin, async (req, res) => {
     try {
-        const user = db.findUserById(req.params.id);
+        const user = await db.findUserById(req.params.id);
         if (!user) return res.status(404).json({ error: 'User not found' });
-        db.removeDevice(req.params.id, req.params.deviceId);
+        await db.removeDevice(req.params.id, req.params.deviceId);
         res.json({ message: 'Xóa device thành công' });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -487,23 +496,30 @@ app.get('/feedback', requireAdmin, (req, res) => {
 // ========================
 // AUTO-SEED ADMIN ACCOUNT
 // ========================
-function seedAdmin() {
-    const email = 'nluat134@gmail.com';
-    const existing = db.findUserByEmail(email);
-    if (existing) {
-        db.updateUser(existing.id, { role: 'admin', username: 'nluat134' });
-        db.updateUserPassword(existing.id, 'anhluat165');
-        console.log('✅ Admin account synced');
-    } else {
-        db.createUser({ username: 'nluat134', email, password: 'anhluat165', role: 'admin' });
-        console.log('✅ Admin account created');
+async function seedAdmin() {
+    try {
+        const email = 'nluat134@gmail.com';
+        const existing = await db.findUserByEmail(email);
+        if (existing) {
+            await db.updateUser(existing.id, { role: 'admin', username: 'nluat134' });
+            await db.updateUserPassword(existing.id, 'anhluat165');
+            console.log('✅ Admin account synced');
+        } else {
+            await db.createUser({ username: 'nluat134', email, password: 'anhluat165', role: 'admin' });
+            console.log('✅ Admin account created');
+        }
+    } catch (err) {
+        console.log('⚠️ Admin seed error (maybe already exists):', err.message);
     }
 }
 
 // ========================
 // START SERVER
 // ========================
-seedAdmin();
-app.listen(PORT, () => {
-    console.log(`🚀 [ServerAdmin] Đang chạy tại http://localhost:${PORT}`);
-});
+async function start() {
+    await seedAdmin();
+    app.listen(PORT, () => {
+        console.log(`🚀 [ServerAdmin] Đang chạy tại http://localhost:${PORT}`);
+    });
+}
+start();
